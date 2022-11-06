@@ -128,21 +128,19 @@ func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, erro
 	case err == nil:
 	case errors.Is(err, redis.Nil):
 		// Get user from db and save to if they exist redis
-		row := opt.SqlDB.Table(usersTable).Select("?", secretColumn).Where("id=?", customIds[0]).Row()
+		row := opt.SqlDB.Table(usersTable).Select(secretColumn).Where("id=?", customIds[0]).Row()
 		// Scan data
 		err = row.Scan(&secret)
-		switch {
-		case err == nil:
-			// Save to redis with expiration
-			err = opt.RedisDB.Set(ctx, key, secret, cacheExpiration).Err()
-			if err != nil {
-				opt.Logger.Errorln("Failed to set user to redis: ", err)
-				return opt.AuthAPI.Authenticator(ctx)
-			}
-		default:
+		if err != nil {
 			// User does not exist or sth went wrong
 			opt.Logger.Errorln("Failed to get user from db: ", err)
 			return nil, status.Error(codes.Internal, "could not complete the request")
+		}
+		// Save to redis with expiration
+		err = opt.RedisDB.Set(ctx, key, secret, cacheExpiration).Err()
+		if err != nil {
+			opt.Logger.Errorln("Failed to set user to redis: ", err)
+			return opt.AuthAPI.Authenticator(ctx)
 		}
 	default:
 		// Decode the jwt using default jwt key
