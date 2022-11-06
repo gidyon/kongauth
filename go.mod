@@ -3,7 +3,6 @@ module github.com/gidyon/kongauth
 go 1.18
 
 require (
-	github.com/gidyon/micro v1.12.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/spf13/viper v1.14.0
 	google.golang.org/grpc v1.50.1
@@ -31,6 +30,7 @@ require (
 	golang.org/x/text v0.4.0 // indirect
 	google.golang.org/genproto v0.0.0-20221024183307-1bc688fe9f3e // indirect
 	google.golang.org/protobuf v1.28.1 // indirect
+	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
