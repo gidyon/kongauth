@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gidyon/micro/utils/errs"
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc/codes"
@@ -18,13 +17,13 @@ import (
 )
 
 var (
-	prefixOnce      *sync.Once
+	prefixOnce      = &sync.Once{}
 	redisAuthPrefix string
-	tableOnce       *sync.Once
+	tableOnce       = &sync.Once{}
 	usersTable      string
-	secretOnce      *sync.Once
+	secretOnce      = &sync.Once{}
 	secretColumn    string
-	expireOnce      *sync.Once
+	expireOnce      = &sync.Once{}
 	cacheExpiration time.Duration
 )
 
@@ -128,20 +127,21 @@ func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, erro
 	switch {
 	case err == nil:
 	case errors.Is(err, redis.Nil):
-		// Get user from db and save to redis
+		// Get user from db and save to if they exist redis
 		row := opt.SqlDB.Table(usersTable).Select("%s", secretColumn).Where("id=?", customIds[0]).Row()
 		// Scan data
 		err = row.Scan(&secret)
 		switch {
 		case err == nil:
-			// Save to redis with 3 hour expiration
+			// Save to redis with expiration
 			err = opt.RedisDB.Set(ctx, key, secret, cacheExpiration).Err()
 			if err != nil {
-				opt.Logger.Errorln(err)
-				return nil, errs.WrapMessage(codes.Internal, "could not complete the request")
+				opt.Logger.Errorln("Failed to set user to redis: ", err)
+				return opt.AuthAPI.Authenticator(ctx)
 			}
 		default:
-			opt.Logger.Errorln(err)
+			// User does not exist or sth went wrong
+			opt.Logger.Errorln("Failed to get user from db: ", err)
 			return nil, status.Error(codes.Internal, "could not complete the request")
 		}
 	default:
