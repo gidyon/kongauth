@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gidyon/micro/utils/errs"
@@ -16,8 +17,51 @@ import (
 	"gorm.io/gorm"
 )
 
-func getRedisUserKey(clientKey, redisAuthPrefix string) string {
-	return fmt.Sprintf("%s:%s", redisAuthPrefix, clientKey)
+var (
+	prefixOnce      *sync.Once
+	redisAuthPrefix string
+	tableOnce       *sync.Once
+	usersTable      string
+	secretOnce      *sync.Once
+	secretColumn    string
+	expireOnce      *sync.Once
+	cacheExpiration time.Duration
+)
+
+// SetRedisAuthPrefix sets the redis auth prefix.
+//
+// This happens once even when called mutiple times.
+func SetRedisAuthPrefix(prefix string) {
+	prefixOnce.Do(func() {
+		redisAuthPrefix = prefix
+	})
+}
+
+// SetUsersTable sets the users table to use.
+//
+// This happens once even when called mutiple times.
+func SetUsersTable(tableName string) {
+	tableOnce.Do(func() {
+		usersTable = tableName
+	})
+}
+
+// SetTableSecretColumn sets the users column to use.
+//
+// This happens once even when called mutiple times.
+func SetTableSecretColumn(column string) {
+	secretOnce.Do(func() {
+		secretColumn = column
+	})
+}
+
+// SetCacheExpiration sets the expiration.
+//
+// This happens once even when called mutiple times.
+func SetCacheExpiration(dur time.Duration) {
+	expireOnce.Do(func() {
+		cacheExpiration = dur
+	})
 }
 
 // AuthAPI is an interface that does authentication
@@ -28,14 +72,10 @@ type AuthAPI interface {
 
 // AuthOptions contains options required for doing kong auth
 type AuthOptions struct {
-	AuthAPI         AuthAPI
-	SqlDB           *gorm.DB
-	RedisDB         *redis.Client
-	Logger          grpclog.LoggerV2
-	CacheExpiration time.Duration
-	RedisAuthPrefix string
-	UsersTable      string
-	SecretColumn    string
+	AuthAPI AuthAPI
+	SqlDB   *gorm.DB
+	RedisDB *redis.Client
+	Logger  grpclog.LoggerV2
 }
 
 func validateAuthOptions(opt *AuthOptions) error {
@@ -50,16 +90,6 @@ func validateAuthOptions(opt *AuthOptions) error {
 		return status.Errorf(codes.InvalidArgument, "missing message field: redis")
 	case opt.Logger == nil:
 		return status.Errorf(codes.InvalidArgument, "missing message field: logger")
-	case opt.RedisAuthPrefix == "":
-		return status.Error(codes.InvalidArgument, "missing redis user key prefix")
-	case opt.UsersTable == "":
-		return status.Error(codes.InvalidArgument, "missing users table")
-	case opt.SecretColumn == "":
-		return status.Error(codes.InvalidArgument, "missing users secret column")
-	default:
-		if opt.CacheExpiration == 0 {
-			opt.CacheExpiration = time.Hour * 3
-		}
 	}
 	return nil
 }
@@ -91,7 +121,7 @@ func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, erro
 	}
 
 	// Key to redis user
-	key := getRedisUserKey(customIds[0], opt.RedisAuthPrefix)
+	key := getRedisUserKey(customIds[0], redisAuthPrefix)
 
 	// Get consumer secret from redis for the particular
 	secret, err := opt.RedisDB.Get(ctx, key).Result()
@@ -99,13 +129,13 @@ func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, erro
 	case err == nil:
 	case errors.Is(err, redis.Nil):
 		// Get user from db and save to redis
-		row := opt.SqlDB.Table(opt.UsersTable).Select("%s", opt.SecretColumn).Where("id=?", customIds[0]).Row()
+		row := opt.SqlDB.Table(usersTable).Select("%s", secretColumn).Where("id=?", customIds[0]).Row()
 		// Scan data
 		err = row.Scan(&secret)
 		switch {
 		case err == nil:
 			// Save to redis with 3 hour expiration
-			err = opt.RedisDB.Set(ctx, key, secret, opt.CacheExpiration).Err()
+			err = opt.RedisDB.Set(ctx, key, secret, cacheExpiration).Err()
 			if err != nil {
 				opt.Logger.Errorln(err)
 				return nil, errs.WrapMessage(codes.Internal, "could not complete the request")
@@ -165,4 +195,8 @@ func ApiContextWithTimeout(md metadata.MD, dur time.Duration, opt *AuthOptions) 
 	}
 
 	return ctx, cancel, nil
+}
+
+func getRedisUserKey(clientKey, redisAuthPrefix string) string {
+	return fmt.Sprintf("%s:%s", redisAuthPrefix, clientKey)
 }
