@@ -128,7 +128,7 @@ func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, erro
 	case err == nil:
 	case errors.Is(err, redis.Nil):
 		// Get user from db and save to if they exist redis
-		row := opt.SqlDB.Table(usersTable).Select("%s", secretColumn).Where("id=?", customIds[0]).Row()
+		row := opt.SqlDB.Table(usersTable).Select("?", secretColumn).Where("id=?", customIds[0]).Row()
 		// Scan data
 		err = row.Scan(&secret)
 		switch {
