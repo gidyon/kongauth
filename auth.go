@@ -28,8 +28,7 @@ var (
 )
 
 // SetRedisAuthPrefix sets the redis auth prefix.
-//
-// This happens once even when called mutiple times.
+// 🔐 Happens once even when called multiple times.
 func SetRedisAuthPrefix(prefix string) {
 	prefixOnce.Do(func() {
 		redisAuthPrefix = prefix
@@ -37,8 +36,7 @@ func SetRedisAuthPrefix(prefix string) {
 }
 
 // SetUsersTable sets the users table to use.
-//
-// This happens once even when called mutiple times.
+// 🧾 Happens once even when called multiple times.
 func SetUsersTable(tableName string) {
 	tableOnce.Do(func() {
 		usersTable = tableName
@@ -46,8 +44,7 @@ func SetUsersTable(tableName string) {
 }
 
 // SetTableSecretColumn sets the users column to use.
-//
-// This happens once even when called mutiple times.
+// 🕵️ Happens once even when called multiple times.
 func SetTableSecretColumn(column string) {
 	secretOnce.Do(func() {
 		secretColumn = column
@@ -55,8 +52,7 @@ func SetTableSecretColumn(column string) {
 }
 
 // SetCacheExpiration sets the expiration.
-//
-// This happens once even when called mutiple times.
+// ⏳ Happens once even when called multiple times.
 func SetCacheExpiration(dur time.Duration) {
 	expireOnce.Do(func() {
 		cacheExpiration = dur
@@ -64,12 +60,16 @@ func SetCacheExpiration(dur time.Duration) {
 }
 
 // AuthAPI is an interface that does authentication
+// 🔐 Contract for authentication
+
+// AuthOptions contains options required for doing kong auth
+// 🧰 Configuration for Kong Auth
+
 type AuthAPI interface {
 	Authenticator(ctx context.Context) (context.Context, error)
 	AuthenticatorWithKey(ctx context.Context, signingKey []byte) (context.Context, error)
 }
 
-// AuthOptions contains options required for doing kong auth
 type AuthOptions struct {
 	AuthAPI AuthAPI
 	SqlDB   *gorm.DB
@@ -100,55 +100,50 @@ func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, erro
 		return nil, err
 	}
 
-	// If kong auth is disabled we use default authentication
+	// 🚫 If kong auth is disabled we use default authentication
 	if viper.GetBool("KONG_AUTH_DISABLED") {
 		return opt.AuthAPI.Authenticator(ctx)
 	}
 
-	// Get request headers from context
+	// 📨 Get request headers from context
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return nil, status.Error(codes.PermissionDenied, "could not complete request due to missing headers")
+		return nil, status.Error(codes.PermissionDenied, "missing headers")
 	}
 
-	// Get forwarded kong header
+	// 🧭 Get forwarded kong header
 	customIds := md.Get(CustomIdHeader())
 	if len(customIds) == 0 {
-		// Means the request has not passed through kong
-		// We use our default authenticator
+		// 🛂 Request bypassed Kong – use default authenticator
 		return opt.AuthAPI.Authenticator(ctx)
 	}
 
-	// Key to redis user
+	// 🔑 Key to redis user
 	key := getRedisUserKey(customIds[0], redisAuthPrefix)
 
-	// Get consumer secret from redis for the particular
+	// 🧠 Get consumer secret from redis or fallback to DB
 	secret, err := opt.RedisDB.Get(ctx, key).Result()
 	switch {
 	case err == nil:
+		// ✅ Found in Redis, proceed
 	case errors.Is(err, redis.Nil):
-		// Get user from db and save to if they exist redis
 		row := opt.SqlDB.Table(usersTable).Select(secretColumn).Where("id=?", customIds[0]).Row()
-		// Scan data
 		err = row.Scan(&secret)
 		if err != nil {
-			// User does not exist or sth went wrong
-			opt.Logger.Errorln("Failed to get user from db: ", err)
-			return nil, status.Error(codes.Internal, "could not complete the request")
+			opt.Logger.Errorln("❌ KongAuth Failed to get user from DB: ", err)
+			return nil, status.Error(codes.Unauthenticated, "authentication required")
 		}
-		// Save to redis with expiration
 		err = opt.RedisDB.Set(ctx, key, secret, cacheExpiration).Err()
 		if err != nil {
-			opt.Logger.Errorln("Failed to set user to redis: ", err)
-			return opt.AuthAPI.Authenticator(ctx)
+			opt.Logger.Errorln("⚠️ KongAuth Failed to cache user in Redis: ", err)
+			return opt.AuthAPI.AuthenticatorWithKey(ctx, []byte(secret))
 		}
 	default:
-		// Decode the jwt using default jwt key
-		opt.Logger.Errorln(err)
-		return nil, status.Error(codes.Internal, "could not complete the request")
+		opt.Logger.Errorln("🚨 KongAuth Redis error: ", err)
+		return nil, status.Error(codes.Internal, "request could not be completed")
 	}
 
-	// Use the key while decoding token
+	// 🗝️ Use the secret key while decoding token
 	return opt.AuthAPI.AuthenticatorWithKey(ctx, []byte(secret))
 }
 
@@ -157,39 +152,31 @@ func CustomIdHeader() string {
 }
 
 func ApiContext(md metadata.MD, opt *AuthOptions) (context.Context, context.CancelFunc, error) {
-	// Validate options
 	err := validateAuthOptions(opt)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Communication context
 	ctx, cancel := context.WithCancel(metadata.NewIncomingContext(context.Background(), md))
-
-	// Authenticate the context using kong auth
 	ctx, err = Authenticator(ctx, opt)
 	if err != nil {
-		return nil, cancel, fmt.Errorf("failed to authorize request: %v", err)
+		return nil, cancel, fmt.Errorf("authorization failed: %v", err)
 	}
 
 	return ctx, cancel, nil
 }
 
 func ApiContextWithTimeout(md metadata.MD, dur time.Duration, opt *AuthOptions) (context.Context, context.CancelFunc, error) {
-	// Validate options
 	err := validateAuthOptions(opt)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Communication context
 	ctx, cancel := context.WithTimeout(context.Background(), dur)
 	ctx = metadata.NewIncomingContext(ctx, md)
-
-	// Authenticate the context using kong auth
 	ctx, err = Authenticator(ctx, opt)
 	if err != nil {
-		return nil, cancel, fmt.Errorf("failed to authorize request: %v", err)
+		return nil, cancel, fmt.Errorf("authorization failed: %v", err)
 	}
 
 	return ctx, cancel, nil
