@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/grpclog"
@@ -19,12 +19,16 @@ import (
 var (
 	prefixOnce      = &sync.Once{}
 	redisAuthPrefix string
+	prefixSet       bool
 	tableOnce       = &sync.Once{}
 	usersTable      string
+	tableSet        bool
 	secretOnce      = &sync.Once{}
 	secretColumn    string
+	secretSet       bool
 	expireOnce      = &sync.Once{}
 	cacheExpiration time.Duration
+	expirationSet   bool
 )
 
 // SetRedisAuthPrefix sets the redis auth prefix.
@@ -32,6 +36,7 @@ var (
 func SetRedisAuthPrefix(prefix string) {
 	prefixOnce.Do(func() {
 		redisAuthPrefix = prefix
+		prefixSet = true
 	})
 }
 
@@ -40,6 +45,7 @@ func SetRedisAuthPrefix(prefix string) {
 func SetUsersTable(tableName string) {
 	tableOnce.Do(func() {
 		usersTable = tableName
+		tableSet = true
 	})
 }
 
@@ -48,6 +54,7 @@ func SetUsersTable(tableName string) {
 func SetTableSecretColumn(column string) {
 	secretOnce.Do(func() {
 		secretColumn = column
+		secretSet = true
 	})
 }
 
@@ -56,6 +63,7 @@ func SetTableSecretColumn(column string) {
 func SetCacheExpiration(dur time.Duration) {
 	expireOnce.Do(func() {
 		cacheExpiration = dur
+		expirationSet = true
 	})
 }
 
@@ -93,10 +101,30 @@ func validateAuthOptions(opt *AuthOptions) error {
 	return nil
 }
 
+func validatePackageConfig() error {
+	switch {
+	case !prefixSet || redisAuthPrefix == "":
+		return status.Error(codes.InvalidArgument, "missing kongauth config: redis auth prefix")
+	case !tableSet || usersTable == "":
+		return status.Error(codes.InvalidArgument, "missing kongauth config: users table")
+	case !secretSet || secretColumn == "":
+		return status.Error(codes.InvalidArgument, "missing kongauth config: secret column")
+	case !expirationSet:
+		return status.Error(codes.InvalidArgument, "missing kongauth config: cache expiration")
+	case cacheExpiration < 0:
+		return status.Error(codes.InvalidArgument, "invalid kongauth config: cache expiration must be non-negative")
+	}
+
+	return nil
+}
+
 // Authenticator is a helper to authenticate requests sent to upstream from Kong
 func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, error) {
 	err := validateAuthOptions(opt)
 	if err != nil {
+		return nil, err
+	}
+	if err := validatePackageConfig(); err != nil {
 		return nil, err
 	}
 
@@ -108,7 +136,7 @@ func Authenticator(ctx context.Context, opt *AuthOptions) (context.Context, erro
 	// 📨 Get request headers from context
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return nil, status.Error(codes.PermissionDenied, "missing headers")
+		return opt.AuthAPI.Authenticator(ctx)
 	}
 
 	// 🧭 Get forwarded kong header
@@ -160,7 +188,7 @@ func ApiContext(md metadata.MD, opt *AuthOptions) (context.Context, context.Canc
 	ctx, cancel := context.WithCancel(metadata.NewIncomingContext(context.Background(), md))
 	ctx, err = Authenticator(ctx, opt)
 	if err != nil {
-		return nil, cancel, fmt.Errorf("authorization failed: %v", err)
+		return nil, cancel, authorizationError(err)
 	}
 
 	return ctx, cancel, nil
@@ -176,7 +204,7 @@ func ApiContextWithTimeout(md metadata.MD, dur time.Duration, opt *AuthOptions) 
 	ctx = metadata.NewIncomingContext(ctx, md)
 	ctx, err = Authenticator(ctx, opt)
 	if err != nil {
-		return nil, cancel, fmt.Errorf("authorization failed: %v", err)
+		return nil, cancel, authorizationError(err)
 	}
 
 	return ctx, cancel, nil
@@ -184,4 +212,12 @@ func ApiContextWithTimeout(md metadata.MD, dur time.Duration, opt *AuthOptions) 
 
 func getRedisUserKey(clientKey, redisAuthPrefix string) string {
 	return fmt.Sprintf("%s:%s", redisAuthPrefix, clientKey)
+}
+
+func authorizationError(err error) error {
+	if s, ok := status.FromError(err); ok {
+		return status.Errorf(s.Code(), "authorization failed: %s", s.Message())
+	}
+
+	return fmt.Errorf("authorization failed: %w", err)
 }
